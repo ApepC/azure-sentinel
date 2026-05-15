@@ -1,0 +1,187 @@
+name: Azure Infrastructure Deploy & Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bicep/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bicep/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, prod]
+      deploy_vm:
+        description: 'Deploy demo VM?'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+env:
+  AZURE_RESOURCE_GROUP: rg-sentinel-${{ github.event.inputs.environment || 'dev' }}
+  AZURE_LOCATION: eastus
+  BICEP_FILE: bicep/main.bicep
+  PARAM_FILE: bicep/parameters.${{ github.event.inputs.environment || 'dev' }}.json
+
+jobs:
+  # ── Job 1: Validate Bicep ──────────────────────────────────
+  validate:
+    name: Validate Bicep Templates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Bicep CLI
+        run: az bicep install
+
+      - name: Bicep Build (lint)
+        run: |
+          az bicep build --file ${{ env.BICEP_FILE }}
+          az bicep build --file bicep/modules/linux-vm.bicep
+
+      - name: What-If Deployment (dry run)
+        run: |
+          az deployment group what-if \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --template-file ${{ env.BICEP_FILE }} \
+            --parameters @${{ env.PARAM_FILE }} \
+            --parameters allowedAdminCidr="${{ secrets.ADMIN_CIDR }}"
+
+  # ── Job 2: Deploy ──────────────────────────────────────────
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ensure Resource Group Exists
+        run: |
+          az group create \
+            --name ${{ env.AZURE_RESOURCE_GROUP }} \
+            --location ${{ env.AZURE_LOCATION }} \
+            --tags project=az104-portfolio environment=${{ github.event.inputs.environment || 'dev' }} managedBy=github-actions
+
+      - name: Deploy Bicep
+        id: deploy
+        run: |
+          RESULT=$(az deployment group create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --template-file ${{ env.BICEP_FILE }} \
+            --parameters @${{ env.PARAM_FILE }} \
+            --parameters allowedAdminCidr="${{ secrets.ADMIN_CIDR }}" \
+            --parameters deployVM="${{ github.event.inputs.deploy_vm || 'false' }}" \
+            --output json)
+          echo "outputs=$(echo $RESULT | jq -c '.properties.outputs')" >> $GITHUB_OUTPUT
+
+      - name: Print Deployment Outputs
+        run: |
+          echo "### Deployment Outputs" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.deploy.outputs.outputs }}' | jq . >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ── Job 3: Post-Deploy Audit ───────────────────────────────
+  audit:
+    name: Post-Deploy Security Audit
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install audit dependencies
+        run: |
+          pip install \
+            azure-identity \
+            azure-mgmt-network \
+            azure-mgmt-storage \
+            azure-mgmt-keyvault \
+            azure-mgmt-compute \
+            azure-mgmt-resource \
+            azure-mgmt-monitor \
+            rich
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run Security Audit
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          python scripts/azure_audit.py \
+            --subscription-id ${{ secrets.AZURE_SUBSCRIPTION_ID }} \
+            --output audit-report.json
+
+      - name: Upload Audit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report-${{ github.run_number }}
+          path: audit-report.json
+          retention-days: 30
+
+      - name: Post Audit Summary
+        run: |
+          echo "### Security Audit Results" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat audit-report.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          print(f'Total findings: {data[\"total_findings\"]}')
+          for sev, count in data['summary'].items():
+              if count > 0:
+                  print(f'{sev}: {count}')
+          " >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ── Job 4: Destroy (manual only) ──────────────────────────
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev'
+    environment:
+      name: destroy-approval
+    needs: []
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Destroy Resource Group
+        run: |
+          az group delete \
+            --name ${{ env.AZURE_RESOURCE_GROUP }} \
+            --yes --no-wait
+          echo "⚠️ Resource group ${{ env.AZURE_RESOURCE_GROUP }} deletion initiated."

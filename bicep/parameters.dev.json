@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment": {
+      "value": "dev"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "projectName": {
+      "value": "sentinel"
+    },
+    "allowedAdminCidr": {
+      "value": "72.94.39.251"
+    },
+    "deployVM": {
+      "value": false
+    },
+    "adminUsername": {
+      "value": "azureadmin"
+    },
+    "tags": {
+      "value": {
+        "project": "az104-portfolio",
+        "environment": "dev",
+        "managedBy": "bicep",
+        "owner": "fred-mann",
+        "costCenter": "personal-lab"
+      }
+    }
+  }
+}
