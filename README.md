@@ -317,7 +317,7 @@ MIT — use freely, attribution appreciated.
 
 <div align="center">
 
-Built by **Fred Mann** | AZ-104 Certified Azure Administrator  
-[LinkedIn](https://linkedin.com/in/fredmann) · [GitHub](https://github.com/fredmann)
+Built by **C Solo** | AZ-104 Certified Azure Administrator  
+[GitHub](https://github.com/ApepC)
 
 </div>
